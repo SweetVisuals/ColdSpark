@@ -1,5 +1,5 @@
-import { DbCampaign } from '../../types/database';
-import { Campaign } from '../../types';
+import { DbCampaign } from '../../types/database.js';
+import { Campaign } from '../../types/index.js';
 
 export function transformDbCampaignToFrontend(dbCampaign: DbCampaign): Campaign {
   return {

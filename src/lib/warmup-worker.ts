@@ -1,7 +1,7 @@
-import { supabase } from './supabase';
-import { EmailAccount } from '../types';
+import { supabase } from './supabase.js';
+import { EmailAccount } from '../types/index.js';
 import nodemailer from 'nodemailer';
-import { WARMUP_RECIPIENTS } from '../constants/warmup-emails';
+import { WARMUP_RECIPIENTS } from '../constants/warmup-emails.js';
 
 interface WarmupJob {
   emailAccount: EmailAccount;
@@ -50,7 +50,7 @@ export class WarmupWorker {
   }
 
   private async calculateTargetEmails(account: EmailAccount): Promise<number> {
-    const today = new Date().toISOString().split('T')[0];
+    // const today = new Date().toISOString().split('T')[0];
     
     // Get yesterday's progress
     const yesterday = new Date();

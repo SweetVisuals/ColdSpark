@@ -1,7 +1,7 @@
-import { EmailAccount } from '../types';
-import { supabase } from './supabase';
-import type { ToasterToast } from '../components/ui/use-toast';
-import { WARMUP_RECIPIENTS } from '../constants/warmup-emails';
+import { EmailAccount } from '../types/index.js';
+import { supabase } from './supabase.js';
+import type { ToasterToast } from '../components/ui/use-toast.js';
+import { WARMUP_RECIPIENTS } from '../constants/warmup-emails.js';
 
 interface WarmupEmail {
   subject: string;

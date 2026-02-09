@@ -1,6 +1,6 @@
-import { supabase } from '../supabase';
-import { EmailTemplate } from '../../types';
-import { toast } from '../../components/ui/use-toast';
+import { supabase } from '../supabase.js';
+import { EmailTemplate } from '../../types/index.js';
+import { toast } from '../../components/ui/use-toast.js';
 
 export async function fetchTemplates(campaignId: string) {
   try {

@@ -1,5 +1,5 @@
 import Papa from 'papaparse';
-import { Lead } from '@/types';
+import { Lead } from '../../types/index.js';
 
 export async function parseCSV(file: File): Promise<Lead[]> {
   return new Promise((resolve, reject) => {

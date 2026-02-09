@@ -1,4 +1,4 @@
-import { generateUUID } from '../utils/uuid';
+import { generateUUID } from '../utils/uuid.js';
 
 export const mockLeads = [
   {

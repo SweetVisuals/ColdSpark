@@ -8,5 +8,13 @@
     "moduleResolution": "NodeNext",
     "allowImportingTsExtensions": false
   },
-  "include": ["src/lib/**/*", "server/**/*"]
+  "include": [
+    "src/lib/**/*",
+    "server/**/*"
+  ],
+  "exclude": [
+    "src/lib/api",
+    "src/components",
+    "src/lib/warmup.ts"
+  ]
 }

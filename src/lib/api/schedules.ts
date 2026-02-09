@@ -64,7 +64,7 @@ export async function scheduleEmails(params: ScheduleParams) {
     if (accountsError) throw accountsError;
 
     // Create progress records for leads
-    const progressRecords = leads.map(lead => ({
+    const progressRecords = leads.map((lead: { id: string }) => ({
       campaign_id: params.campaignId,
       schedule_id: schedule.id,
       lead_id: lead.id,
