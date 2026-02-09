@@ -1,4 +1,5 @@
 import { EmailAccount } from '../types/index.js';
+import { api } from './api/api.js';
 import { supabase } from './supabase.js';
 import type { ToasterToast } from '../components/ui/use-toast.js';
 import { WARMUP_RECIPIENTS } from '../constants/warmup-emails.js';
@@ -100,30 +101,22 @@ export class WarmupService {
   private async sendEmail(email: WarmupEmail): Promise<void> {
     // Use the account's SMTP settings to send the email
     // This is a simplified example - in a real implementation you would use a proper SMTP client
-    const response = await fetch('/api/send-email', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: this.account.email,
-        to: email.to,
-        subject: email.subject,
-        text: email.body,
-        smtp: {
-          host: this.account.smtp_host,
-          port: this.account.smtp_port,
-          secure: true,
-          auth: {
-            user: this.account.email,
-            pass: this.account.smtp_password // Note: You should securely store and retrieve the password
-          }
+    // Use the account's SMTP settings to send the email
+    // This is a simplified example - in a real implementation you would use a proper SMTP client
+    const response = await api.post('/send-email', {
+      from: this.account.email,
+      to: email.to,
+      subject: email.subject,
+      text: email.body,
+      smtp: {
+        host: this.account.smtp_host,
+        port: this.account.smtp_port,
+        secure: true,
+        auth: {
+          user: this.account.email,
+          pass: this.account.smtp_password // Note: You should securely store and retrieve the password
         }
-      })
+      }
     });
-
-    if (!response.ok) {
-      throw new Error('Failed to send email');
-    }
   }
 }

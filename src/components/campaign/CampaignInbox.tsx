@@ -6,6 +6,7 @@ import { format } from 'date-fns';
 import { cn } from '../../lib/utils';
 import { useToast } from '../ui/use-toast';
 import { fetchEmailAccounts } from '../../lib/api/email-accounts';
+import { api } from '../../lib/api/api';
 
 interface CampaignInboxProps {
     campaignId: string;
@@ -65,28 +66,23 @@ const CampaignInbox = ({ campaignId }: CampaignInboxProps) => {
             const { data: { session } } = await supabase.auth.getSession();
             if (!session) return;
 
-            const url = new URL('/api/emails', window.location.origin);
-            url.searchParams.append('campaignId', campaignId);
-
+            const params = new URLSearchParams();
+            params.append('campaignId', campaignId);
             if (accountId && accountId !== 'all') {
-                url.searchParams.append('emailAccountId', accountId);
+                params.append('emailAccountId', accountId);
             }
-
             if (refresh) {
-                url.searchParams.append('refresh', 'true');
+                params.append('refresh', 'true');
             }
 
-            const response = await fetch(url.toString(), {
+            const response = await api.get('/emails', {
+                params,
                 headers: {
                     'Authorization': `Bearer ${session.access_token}`
                 }
             });
 
-            if (!response.ok) {
-                throw new Error('Failed to fetch emails');
-            }
-
-            const result = await response.json();
+            const result = response.data;
             if (result.success) {
                 setEmails(result.data);
             } else {
@@ -186,23 +182,22 @@ const CampaignInbox = ({ campaignId }: CampaignInboxProps) => {
             // Perform actions per account
             const results = await Promise.all(
                 Object.entries(groupedByAccount).map(([accountId, data]) =>
-                    fetch('/api/emails/action', {
-                        method: 'POST',
+                    api.post('/emails/action', {
+                        emailAccountId: accountId,
+                        uids: data.uids,
+                        action,
+                        folder: data.folder
+                    }, {
                         headers: {
-                            'Content-Type': 'application/json',
                             'Authorization': `Bearer ${session.access_token}`
-                        },
-                        body: JSON.stringify({
-                            emailAccountId: accountId,
-                            uids: data.uids,
-                            action,
-                            folder: data.folder
-                        })
+                        }
                     })
                 )
             );
 
-            const allOk = results.every(res => res.ok);
+            // Axios throws on error by default, so if we get here, it succeeded.
+            // But we can check status if needed. 
+            const allOk = results.every(res => res.status >= 200 && res.status < 300);
 
             if (!allOk) {
                 throw new Error('Failed to perform action on some emails');
