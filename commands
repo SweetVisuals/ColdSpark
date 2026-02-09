@@ -1,0 +1,4 @@
+
+
+SERVER:
+npx ts-node --esm server/index.mjs

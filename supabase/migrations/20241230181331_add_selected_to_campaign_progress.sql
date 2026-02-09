@@ -1,0 +1,2 @@
+ALTER TABLE campaign_progress
+ADD COLUMN selected BOOLEAN DEFAULT FALSE;
