@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { Lead } from '../types';
-import axios from 'axios';
+import { api } from '../lib/api/api';
 import LeadScraperForm from '../components/lead-scraper/LeadScraperForm';
 import LeadScraperResults from '../components/lead-scraper/LeadScraperResults';
 import Layout from '../components/layout/Layout';
@@ -37,7 +37,7 @@ const LeadScraper = () => {
 
       // 2. Check if scraping is in progress
       try {
-        const activeRes = await axios.get('/api/scraper-active', config);
+        const activeRes = await api.get('/scraper-active', config);
         if (activeRes.data.active) {
           setIsSearching(true);
           setHasSearched(true);
@@ -63,13 +63,13 @@ const LeadScraper = () => {
           };
 
           // Poll Logs
-          const logRes = await axios.get('/api/scraper-logs', config);
+          const logRes = await api.get('/scraper-logs', config);
           if (Array.isArray(logRes.data)) {
             setLogs(logRes.data);
           }
 
           // Poll Results (Live Update!)
-          const resultRes = await axios.get('/api/scraper-results', config);
+          const resultRes = await api.get('/scraper-results', config);
           if (Array.isArray(resultRes.data) && resultRes.data.length > 0) {
             setSearchResults(resultRes.data);
           }
@@ -91,7 +91,7 @@ const LeadScraper = () => {
         return;
       }
 
-      const response = await axios.post('/api/scrape-leads', searchParams, {
+      const response = await api.post('/scrape-leads', searchParams, {
         headers: {
           Authorization: `Bearer ${session.access_token}`
         },

@@ -10,14 +10,37 @@ import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('CRITICAL ERROR: SUPABASE_URL or SUPABASE_ANON_KEY is missing from environment variables.');
+}
+
+// Create client only if vars exist to prevent crash, otherwise null
+const supabase = (supabaseUrl && supabaseKey)
+  ? createClient(supabaseUrl, supabaseKey)
+  : null;
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+
+// Add a root route for health check
+app.get('/', (req, res) => {
+  res.send('ColdSpark Backend API is running. Time: ' + new Date().toISOString());
+});
+app.get('/api', (req, res) => {
+  res.send('API Root Accessible');
+});
+app.use(cors({
+  origin: true, // Reflect request origin to allow all
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-campaign-id']
+}));
+
+// Handle preflight requests explicitly
+app.options('*', cors());
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'sk-d703ac9c0fe74d05b1693c50a81ea9bc';
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';

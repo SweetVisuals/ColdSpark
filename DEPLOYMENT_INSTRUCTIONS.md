@@ -1,4 +1,3 @@
-
 # Backend Deployment Guide (cPanel + Vercel)
 
 Since you are hosting the frontend on **Vercel** and have access to **cPanel**, you need to host your backend (Node.js/Express) on cPanel to keep it running 24/7.
@@ -46,10 +45,8 @@ Now that your backend is live, you need to tell your Vercel frontend where to fi
 
 1. Go to your **Vercel Project Dashboard**.
 2. Click **Settings** > **Environment Variables**.
-3. Add a new variable:
-   - **Key**: `VITE_API_URL`
-   - **Value**: `https://api.relaysolutions.net`
-     *Note: Do not include a trailing slash.*
+3. Add `VITE_API_URL` with value `https://api.relaysolutions.net/api` (Make sure to include `/api` at the end).
+   *Note: Do not include a trailing slash.*
 
 4. **Redeploy**:
    - Go to **Deployments** and click "Redeploy" on the latest commit, or just push a new commit.

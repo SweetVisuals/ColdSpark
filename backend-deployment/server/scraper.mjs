@@ -1,4 +1,4 @@
-import puppeteer from 'puppeteer';
+// import puppeteer from 'puppeteer'; // Removed for dynamic import
 import fs from 'fs';
 import { validateEmail } from './email-validation.mjs';
 
@@ -48,6 +48,15 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
     log(`Starting Google Maps scraper for: ${query} (Target: ${targetLimit})`);
 
     let browser;
+    let puppeteer;
+    try {
+        const p = await import('puppeteer');
+        puppeteer = p.default || p;
+    } catch (e) {
+        log('Failed to load puppeteer. Ensure it is installed.');
+        throw new Error('Puppeteer dependency missing');
+    }
+
     if (process.env.BROWSER_WS_ENDPOINT) {
         log(`Connecting to remote browser: ${process.env.BROWSER_WS_ENDPOINT}`);
         browser = await puppeteer.connect({
@@ -441,7 +450,16 @@ export async function scrapeLinkedIn(query, limit = 20, onLog = null, onResult =
     log(`Starting LinkedIn scraper for: ${query}`);
 
     // Launch browser
+    // Launch browser
     let browser;
+    let puppeteer;
+    try {
+        const p = await import('puppeteer');
+        puppeteer = p.default || p;
+    } catch (e) {
+        throw new Error('Puppeteer dependency missing');
+    }
+
     if (process.env.BROWSER_WS_ENDPOINT) {
         log(`Connecting to remote browser for LinkedIn...`);
         browser = await puppeteer.connect({
@@ -470,7 +488,16 @@ export async function scrapeGeneralSearch(query, limit = 20, onLog = null, onRes
     log(`Starting General Search for: ${query}`);
 
     // Launch browser
+    // Launch browser
     let browser;
+    let puppeteer;
+    try {
+        const p = await import('puppeteer');
+        puppeteer = p.default || p;
+    } catch (e) {
+        throw new Error('Puppeteer dependency missing');
+    }
+
     if (process.env.BROWSER_WS_ENDPOINT) {
         log(`Connecting to remote browser for General Search...`);
         browser = await puppeteer.connect({
