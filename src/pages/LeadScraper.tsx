@@ -57,9 +57,7 @@ const LeadScraper = () => {
           if (!session) return;
 
           const config = {
-            headers: {
-              Authorization: `Bearer ${session.access_token}`
-            }
+            headers: { Authorization: `Bearer ${session.access_token}` }
           };
 
           // Poll Logs
@@ -73,7 +71,17 @@ const LeadScraper = () => {
           if (Array.isArray(resultRes.data) && resultRes.data.length > 0) {
             setSearchResults(resultRes.data);
           }
-        } catch (e) { }
+
+          // Check if scrape is still active
+          const activeRes = await api.get('/scraper-active', config);
+          if (activeRes.data && activeRes.data.active === false) {
+            console.log('Scrape finished via poll');
+            setIsSearching(false);
+          }
+
+        } catch (e) {
+          console.error('Polling error:', e);
+        }
       }, 2000);
     }
     return () => { if (interval) clearInterval(interval); };
@@ -88,23 +96,29 @@ const LeadScraper = () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         console.error('No session');
+        setIsSearching(false);
         return;
       }
 
-      const response = await api.post('/scrape-leads', searchParams, {
+      // Fire and forget - backend handles background processing
+      await api.post('/scrape-leads', searchParams, {
         headers: {
           Authorization: `Bearer ${session.access_token}`
         },
-        timeout: 300000 // 5 minutes timeout
+        timeout: 300000
       });
-      if (response.data.success) {
-        // setSearchResults(response.data.data); // Handled by Key Polling now
-      }
-    } catch (error) {
+
+    } catch (error: any) {
       console.error('Search failed:', error);
-      // You might want to show a toast error here
-    } finally {
-      setIsSearching(false);
+      if (error.response) {
+        console.error('Error status:', error.response.status);
+        console.error('Error data:', error.response.data);
+      }
+      if (error.config) {
+        console.error('Failed URL:', error.config.url);
+        console.error('Base URL:', error.config.baseURL);
+      }
+      setIsSearching(false); // Only stop on initial request failure
     }
   };
 

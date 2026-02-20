@@ -1,6 +1,36 @@
 // import puppeteer from 'puppeteer'; // Removed for dynamic import
 import fs from 'fs';
-import { validateEmail } from './email-validation.mjs';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+import { validateEmail, validateEmailFast } from './email-validation.mjs';
+const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
+
+const getChromePath = () => {
+    // 1. Try generic system paths
+    const paths = [
+        '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium', '/usr/bin/chromium-browser',
+        '/usr/bin/brave-browser'
+    ];
+    for (const p of paths) if (fs.existsSync(p)) return p;
+
+    // 2. Try User Cache (Generic search)
+    try {
+        const homedir = os.homedir();
+        const cacheRoot = path.join(homedir, '.cache/puppeteer');
+        if (fs.existsSync(cacheRoot)) {
+            // Find 'chrome' binary recursively that is executable
+            // Try to find the chrome binary inside cache
+            const out = execSync(`find "${cacheRoot}" -name chrome -type f -executable 2>/dev/null | head -n 1`, { timeout: 3000 });
+            const found = out.toString().trim();
+            if (found && fs.existsSync(found)) return found;
+        }
+    } catch (e) { console.error('Error finding chrome in cache:', e); }
+
+    return null;
+};
 
 const createLogger = (onLog) => (message) => {
     console.log(message);
@@ -41,6 +71,79 @@ async function autoScroll(page) {
     });
 }
 
+// Helper to setup browser consistently
+async function setupBrowser(log) {
+    let browser;
+    let puppeteer;
+    let executablePath = null;
+    let args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1920,1080',
+        '--start-maximized'
+    ];
+
+    // STRATEGY: Prioritize @sparticuz/chromium because standard Chrome is broken on this server (missing libs).
+    // Even if 'puppeteer' is installed, we should avoid using its bundled chrome.
+
+    // 1. Try Sparticuz (Preferred for cPanel/Serverless)
+    try {
+        const localTmp = path.join(os.homedir(), 'api.relaysolutions.net', '.local_chrome');
+        if (!fs.existsSync(localTmp)) { fs.mkdirSync(localTmp, { recursive: true }); }
+
+        // CRITICAL Environment setup for Sparticuz
+        process.env.TMPDIR = localTmp;
+        process.env.HOME = localTmp;
+
+        const sparticuz = require('@sparticuz/chromium');
+        // sparticuz.setHeadlessMode = true; // explicitly set headless
+        // sparticuz.setGraphicsMode = false;
+
+        executablePath = await sparticuz.executablePath();
+        args = [...sparticuz.args, '--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox'];
+
+        puppeteer = require('puppeteer-core');
+        log('Using @sparticuz/chromium + puppeteer-core (Priority Match)');
+
+    } catch (e) {
+        log(`Sparticuz failed/missing: ${e.message}. Falling back to standard puppeteer.`);
+
+        // 2. Fallback to Standard Puppeteer
+        try {
+            puppeteer = require('puppeteer');
+            log('Using standard puppeteer package.');
+        } catch (e2) {
+            // 3. Last Ditch: Puppeteer Core only (expects local chrome)
+            try {
+                puppeteer = require('puppeteer-core');
+                const exe = getChromePath();
+                if (exe) {
+                    executablePath = exe;
+                    log(`Using local chrome discovery: ${exe}`);
+                }
+            } catch (e3) {
+                throw new Error('Puppeteer dependency missing (All methods failed).');
+            }
+        }
+    }
+
+    if (process.env.BROWSER_WS_ENDPOINT) {
+        log(`Connecting to remote browser...`);
+        browser = await puppeteer.connect({ browserWSEndpoint: process.env.BROWSER_WS_ENDPOINT });
+    } else {
+        const launchOptions = {
+            headless: "new",
+            args: args,
+            ignoreHTTPSErrors: true
+        };
+        if (executablePath) launchOptions.executablePath = executablePath;
+
+        browser = await puppeteer.launch(launchOptions);
+    }
+    return { browser, puppeteer };
+}
+
 export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult = null, notesContext = '') {
     const log = createLogger(onLog);
     // Increase limit for variety - minimal 75
@@ -50,34 +153,35 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
     let browser;
     let puppeteer;
     try {
-        const p = await import('puppeteer');
-        puppeteer = p.default || p;
+        log('Launching browser...');
+        const setup = await setupBrowser(log);
+        browser = setup.browser;
+        puppeteer = setup.puppeteer;
+        log('Browser launched successfully.');
     } catch (e) {
-        log('Failed to load puppeteer. Ensure it is installed.');
-        throw new Error('Puppeteer dependency missing');
+        log(`CRITICAL: Browser Launch Failed: ${e.message}`);
+        return [];
     }
-
-    if (process.env.BROWSER_WS_ENDPOINT) {
-        log(`Connecting to remote browser: ${process.env.BROWSER_WS_ENDPOINT}`);
-        browser = await puppeteer.connect({
-            browserWSEndpoint: process.env.BROWSER_WS_ENDPOINT,
-        });
-    } else {
-        browser = await puppeteer.launch({
-            headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-    }
-
-    const page = await browser.newPage();
-
-    // Set huge viewport to find more results without scrolling initially
-    await page.setViewport({ width: 1440, height: 900 });
-
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
     try {
-        await page.goto('https://www.google.com/maps', { waitUntil: 'networkidle2', timeout: 60000 });
+        process.env.TZ = 'America/New_York'; // Helps with some scraping issues
+
+        log('Opening new page...');
+        const page = await browser.newPage();
+
+        // Ensure browser is closed if page crashes
+        page.on('error', err => log(`Page Error: ${err.message}`));
+
+        // Set huge viewport to find more results without scrolling initially
+        await page.setViewport({ width: 1440, height: 900 });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+        log('Navigating to Google Maps...');
+        // Use domcontentloaded — networkidle2 hangs on Google Maps (it never goes fully idle)
+        await page.goto('https://www.google.com/maps', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        // Extra wait for the JS to render the search box
+        await new Promise(r => setTimeout(r, 3000));
+        log('Google Maps loaded.');
 
         // helper to handle consent
         const handleConsent = async () => {
@@ -99,6 +203,7 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
         };
 
         await handleConsent();
+        log('Consent handled. Looking for search box...');
 
         // Robust Search Box Finding
         const searchSelectors = [
@@ -109,7 +214,6 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
             'input#searchbox-searchbutton + input',
             '#searchbox form input'
         ];
-
 
         let searchInputSelector = null;
 
@@ -163,28 +267,28 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
         const leads = [];
         const processedIds = new Set();
         let noNewResultsCount = 0;
+        let noNewElementsStreak = 0;
         let totalProcessed = 0;
+        let leadsWithEmail = 0; // Track leads that actually have emails
         const feedSelector = 'div[role="feed"]';
 
-        // More persistent loop
-        while (leads.length < targetLimit && noNewResultsCount < 50) {
+        // Keep scrolling until we have targetLimit leads WITH emails
+        while (leadsWithEmail < targetLimit && noNewResultsCount < 60) {
             const elements = await page.$$('div[role="article"]');
 
-            // Process Items
-            const batchPromises = [];
+            // Collect unprocessed elements first
+            const pendingElements = [];
             for (const el of elements) {
-                if (leads.length >= targetLimit) break;
+                if (leadsWithEmail >= targetLimit) break;
 
                 const ariaLabel = await el.evaluate(e => e.getAttribute('aria-label'));
                 if (processedIds.has(ariaLabel)) continue;
 
                 // RELEVANCE FILTER: Check if name matches query context
-                // If searching for "Street Food", reject "Car Wash", "Mechanic", "Accountant"
                 const lowerName = ariaLabel.toLowerCase();
                 const lowerQuery = query.toLowerCase();
 
                 // Simple negative keywords based on common mixups or map ads
-                // If query mentions "food" or "restaurant", block irrelevant industries
                 if (lowerQuery.includes('food') || lowerQuery.includes('market') || lowerQuery.includes('truck')) {
                     if (lowerName.includes('car wash') ||
                         lowerName.includes('mechanic') ||
@@ -198,28 +302,26 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                     }
                 }
 
-
-
                 processedIds.add(ariaLabel);
                 totalProcessed++;
 
-                batchPromises.push((async () => {
+                pendingElements.push(el);
+            }
+
+            // Process in batches of 5 to avoid overwhelming the server
+            const BATCH_SIZE = 5;
+            for (let batchStart = 0; batchStart < pendingElements.length; batchStart += BATCH_SIZE) {
+                if (leadsWithEmail >= targetLimit) break;
+                const batch = pendingElements.slice(batchStart, batchStart + BATCH_SIZE);
+                const batchPromises = batch.map(el => (async () => {
                     try {
                         // Helper for robust phone extraction (UK focus)
                         const extractPhoneNumber = (str) => {
                             if (!str) return '';
-
-                            // Specific UK Patterns: 
-                            // Starts with: +44, 0044, 44, 0
-                            // Next digit: 2 (London/Landline) or 7 (Mobile)
-                            // Followed by: 7-13 digits/spaces/dashes
                             const ukSpecific = str.match(/(?:(?:\+|00)44|(?<!\d)44|(?<!\d)0)(?:2|7)[\d\s-]{8,13}/);
                             if (ukSpecific) return ukSpecific[0].replace(/\s+/g, ' ').trim();
-
-                            // Fallback: Standard International (if not caught above but looks valid)
                             const intlMatch = str.match(/(\+|00)[0-9][0-9\s-]{8,20}[0-9]/);
                             if (intlMatch) return intlMatch[0].replace(/\s+/g, ' ').trim();
-
                             return '';
                         };
 
@@ -228,9 +330,7 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
 
                         const getCleanUrl = (url) => {
                             if (!url) return '';
-                            // Bad Google Viewer links
                             if (url.includes('google.com/viewer')) return '';
-
                             if (url.includes('google.com/aclk') || url.includes('google.com/url')) {
                                 try { return decodeURIComponent(url.split('adurl=')[1] || url.split('q=')[1]).split('&')[0]; } catch (e) { return url; }
                             }
@@ -239,21 +339,13 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
 
                         let websiteUrl = await el.evaluate(e => {
                             const anchors = Array.from(e.querySelectorAll('a'));
-                            // Try multiple strategies to find the website link
                             const webLink = anchors.find(a => {
                                 const href = a.href || '';
                                 const label = (a.getAttribute('aria-label') || '').toLowerCase();
                                 const dataVal = a.getAttribute('data-value');
-
-                                // Skip map links/directions
                                 if (href.includes('google.com/maps')) return false;
-
-                                // Explicit Website Buttons
                                 if (dataVal === 'Website' || label.includes('website')) return true;
-
-                                // Generic non-google links (often the title link is just a map deep link, so ignore long google urls)
                                 if (href.startsWith('http') && !href.includes('google.com')) return true;
-
                                 return false;
                             });
                             return webLink ? webLink.href : '';
@@ -265,35 +357,26 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                         if (!phone && !website) {
                             try {
                                 await el.click();
-                                await page.waitForTimeout(1500);
+                                await page.waitForTimeout(3500);
+                                await page.waitForSelector('div[role="main"]', { timeout: 5000 }).catch(() => { });
 
                                 const sideData = await page.evaluate(() => {
                                     const res = { phone: '', website: '' };
                                     const main = document.querySelector('div[role="main"]');
                                     if (!main) return res;
-
-                                    // Scan everything
                                     const candidates = Array.from(main.querySelectorAll('a, button, div[data-item-id]'));
-
                                     for (const c of candidates) {
                                         const label = (c.getAttribute('aria-label') || '').toLowerCase();
                                         const itemId = c.getAttribute('data-item-id') || '';
                                         const href = c.href || '';
                                         const txt = c.innerText || '';
-
-                                        // Website
                                         if (!res.website) {
                                             const isWeb = itemId.includes('authority') || label.includes('website') || (href && !href.includes('google') && !href.includes('fid='));
                                             if (isWeb && href) res.website = href;
                                         }
-
-                                        // Phone
                                         if (!res.phone) {
                                             const isPhone = itemId.includes('phone') || label.includes('phone') || label.includes('call') || itemId.includes('call');
                                             if (isPhone) {
-                                                // Improved Phone Regex (UK Focused)
-                                                // Matches: (+44, 0044, 44, 0) followed by (2 or 7)
-                                                // Usage of non-capturing group for boundaries to avoid '123447123' matching '447123'
                                                 const phoneRegex = /(?:(?:\+|00)44|(?:\b)44|(?:\b)0)(?:2|7)[\d\s-]{8,13}/;
                                                 const m = (label + ' ' + txt).match(phoneRegex);
                                                 if (m) res.phone = m[0].replace(/\s+/g, ' ').trim();
@@ -310,20 +393,18 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
 
                         if (website && !website.startsWith('http') && !website.includes('google')) website = 'http://' + website;
 
-                        // FALLBACK: If no website found on Maps, Search Google for it!
+                        // FALLBACK: If no website found on Maps, Search DuckDuckGo for it!
                         if (!website || website === 'http://' || website.length < 8 || website.includes('google')) {
-                            // Reset if invalid
                             if (website.length < 8) website = '';
-
                             try {
-                                log(`Maps didn't have website for ${ariaLabel}, searching Google...`);
+                                log(`Maps didn't have website for ${ariaLabel}, searching DuckDuckGo...`);
                                 const searchQuery = `${ariaLabel} ${query.replace(' in ', ' ')} official site`;
-                                const foundUrl = await findWebsiteViaGoogle(browser, searchQuery);
+                                const foundUrl = await findWebsiteViaDuckDuckGo(browser, searchQuery);
                                 if (foundUrl) {
                                     website = foundUrl;
-                                    log(`Found Website via Search: ${website}`);
+                                    log(`Found Website via DDG: ${website}`);
                                 } else {
-                                    log(`Search returned no website for ${ariaLabel}`);
+                                    log(`DDG Search returned no website for ${ariaLabel}`);
                                 }
                             } catch (e) {
                                 log(`Fallback Search Error: ${e.message}`);
@@ -341,26 +422,53 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                         let isDirectory = false;
                         if (website) isDirectory = DIRECTORY_DOMAINS.some(d => website.includes(d));
 
-                        // VISIT WEBSITE
+                        // FAST EMAIL SEARCH VIA DDG (runs first - faster than visiting website)
+                        if (!email) {
+                            try {
+                                const emailResult = await Promise.race([
+                                    googleSearchEmail(browser, ariaLabel, website, log),
+                                    new Promise((_, reject) => setTimeout(() => reject(new Error('Email search timeout')), 25000))
+                                ]);
+                                if (emailResult && emailResult.email) {
+                                    email = emailResult.email;
+                                    // Use DDG page text as summary basis if no website visit planned
+                                    if (emailResult.pageText && emailResult.pageText.length > 50) {
+                                        summary = emailResult.pageText.substring(0, 800);
+                                    }
+                                }
+                            } catch (e) {
+                                log(`DDG email search timed out for ${ariaLabel}`);
+                            }
+                        }
+
+                        // VISIT WEBSITE — always run for phone/social, also gets email if not found yet
                         if (website && !website.includes('google') && !isDirectory) {
                             try {
-                                const webData = await scrapeWebsite(browser, website, log, notesContext, ariaLabel);
-                                if (webData.email) email = webData.email;
+                                const webData = await Promise.race([
+                                    scrapeWebsite(browser, website, log, notesContext, ariaLabel, true), // skipExternalIntel=true
+                                    new Promise((_, reject) => setTimeout(() => reject(new Error('Website visit timeout')), 25000))
+                                ]);
+                                if (webData.email && !email) email = webData.email;
                                 if (webData.phone && !phone) phone = webData.phone;
                                 if (webData.summary) summary = webData.summary;
                                 Object.assign(social, webData.social);
-                            } catch (e) { }
+                            } catch (e) {
+                                log(`Website visit failed for ${ariaLabel}: ${e.message}`);
+                            }
                         }
 
-                        // FALLBACK SEARCH
-                        if (!email) {
+                        // LAST RESORT: if still no email and no website, try a broader Google search
+                        if (!email && !website) {
                             try {
-                                const googleEmail = await googleSearchEmail(browser, ariaLabel, website);
+                                const googleEmail = await Promise.race([
+                                    googleSearchEmail(browser, ariaLabel, '', log),
+                                    new Promise((_, reject) => setTimeout(() => reject(new Error('Fallback email search timeout')), 20000))
+                                ]);
                                 if (googleEmail) email = googleEmail;
                             } catch (e) { }
                         }
 
-                        // Directory Email Filter (e.g. profiles@birdeye.com)
+                        // Directory Email Filter
                         if (email) {
                             const emailParts = email.split('@');
                             if (emailParts.length === 2) {
@@ -372,14 +480,15 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                             }
                         }
 
-                        // STRICT FILTER: Email, Website, and Name (Company Name) are mandatory
-                        // 'ariaLabel' is the Company Name here.
-                        if (!email || !website || !ariaLabel) {
-                            log(`Dropped ${ariaLabel}: Missing requirements or directory filtered.`);
+                        // FILTER: Require both company name AND email for cold outreach
+                        if (!ariaLabel || !email) {
+                            if (!ariaLabel) log(`Dropped: No company name found.`);
+                            else log(`Dropped ${ariaLabel}: No email found.`);
                             return null;
                         }
 
-                        log(`Found: ${ariaLabel} (Email: ${email || 'No'} | Summary: ${summary ? 'Yes' : 'No'})`);
+                        leadsWithEmail++;
+                        log(`✅ Lead #${leadsWithEmail}: ${ariaLabel} | Email: ${email} | Phone: ${phone || 'none'} | Website: ${website || 'none'}`);
 
                         return {
                             id: `scraped-${Math.random().toString(36).substr(2, 9)}`,
@@ -394,43 +503,50 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                         };
                     } catch (e) { return null; }
                 })());
-            }
 
-            const results = (await Promise.all(batchPromises)).filter(x => x);
-            leads.push(...results);
+                const batchResults = (await Promise.all(batchPromises)).filter(x => x);
+                leads.push(...batchResults);
 
-            // Emit Live Results
-            if (onResult && typeof onResult === 'function') {
-                for (const result of results) {
-                    onResult(result).catch(err => log(`Error in onResult callback: ${err.message}`));
+                // Emit Live Results
+                if (onResult && typeof onResult === 'function') {
+                    for (const result of batchResults) {
+                        onResult(result).catch(err => log(`Error in onResult callback: ${err.message}`));
+                    }
                 }
-            }
+            } // end batch loop
 
-            log(`Progress: ${leads.length} leads. (Scanned ${totalProcessed})`);
+            log(`Progress: ${leadsWithEmail} leads with email. (Scanned ${totalProcessed} total)`);
 
-            // SCROLL
-            if (leads.length < targetLimit) {
+            // SCROLL to load more results
+            if (leadsWithEmail < targetLimit) {
+                const prevCount = elements.length;
                 await page.evaluate((sel) => {
                     const el = document.querySelector(sel);
                     if (el) el.scrollBy(0, 5000);
                 }, feedSelector);
                 await page.mouse.wheel({ deltaY: 2000 });
-                await new Promise(r => setTimeout(r, 2000));
+                await new Promise(r => setTimeout(r, 2500));
 
                 const newEls = await page.$$('div[role="article"]');
-                if (newEls.length === elements.length) {
+                if (newEls.length === prevCount) {
+                    noNewElementsStreak++;
                     noNewResultsCount++;
-                    log('Scrolling...');
+                    if (noNewElementsStreak > 3) {
+                        log('No new results loading after multiple scrolls. Stopping.');
+                        break;
+                    }
+                    log(`Scrolling for more results... (${noNewResultsCount}/60)`);
                 } else {
+                    noNewElementsStreak = 0;
                     noNewResultsCount = 0;
                 }
             }
         }
-        log(`Scraping Complete. Found ${leads.length} leads.`);
+        log(`Scraping Complete. Found ${leadsWithEmail} leads with emails (${totalProcessed} total scanned).`);
         return leads;
     } catch (e) {
-        log(`Error in Google Maps Scraper: ${e.message}`);
-        return leads;
+        log(`CRITICAL Scraper Error: ${e.message}`);
+        return [];
     } finally {
         if (browser) {
             try {
@@ -449,36 +565,16 @@ export async function scrapeLinkedIn(query, limit = 20, onLog = null, onResult =
     const log = createLogger(onLog);
     log(`Starting LinkedIn scraper for: ${query}`);
 
-    // Launch browser
-    // Launch browser
     let browser;
-    let puppeteer;
     try {
-        const p = await import('puppeteer');
-        puppeteer = p.default || p;
-    } catch (e) {
-        throw new Error('Puppeteer dependency missing');
-    }
-
-    if (process.env.BROWSER_WS_ENDPOINT) {
-        log(`Connecting to remote browser for LinkedIn...`);
-        browser = await puppeteer.connect({
-            browserWSEndpoint: process.env.BROWSER_WS_ENDPOINT,
-        });
-    } else {
-        browser = await puppeteer.launch({
-            headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-    }
-
-    try {
+        const setup = await setupBrowser(log);
+        browser = setup.browser;
         return await scrapeGoogleSearch(browser, query, limit, log, 'linkedin', onResult, notesContext);
     } catch (error) {
         log(`LinkedIn Scraping Error: ${error.message}`);
         throw error;
     } finally {
-        await browser.close();
+        if (browser) await browser.close();
     }
 }
 
@@ -487,36 +583,16 @@ export async function scrapeGeneralSearch(query, limit = 20, onLog = null, onRes
     const log = createLogger(onLog);
     log(`Starting General Search for: ${query}`);
 
-    // Launch browser
-    // Launch browser
     let browser;
-    let puppeteer;
     try {
-        const p = await import('puppeteer');
-        puppeteer = p.default || p;
-    } catch (e) {
-        throw new Error('Puppeteer dependency missing');
-    }
-
-    if (process.env.BROWSER_WS_ENDPOINT) {
-        log(`Connecting to remote browser for General Search...`);
-        browser = await puppeteer.connect({
-            browserWSEndpoint: process.env.BROWSER_WS_ENDPOINT,
-        });
-    } else {
-        browser = await puppeteer.launch({
-            headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-    }
-
-    try {
+        const setup = await setupBrowser(log);
+        browser = setup.browser;
         return await scrapeGoogleSearch(browser, query, limit, log, 'general', onResult, notesContext);
     } catch (error) {
         log(`General Scraping Error: ${error.message}`);
         throw error;
     } finally {
-        await browser.close();
+        if (browser) await browser.close();
     }
 }
 
@@ -647,31 +723,97 @@ async function scrapeGoogleSearch(browser, query, limit, log, type, onResult = n
 }
 
 
-// Retaining Helper Functions
-async function googleSearchEmail(browser, companyName, website) {
+// Email search via DuckDuckGo (much less bot detection than Google)
+async function googleSearchEmail(browser, companyName, website, log = console.log) {
     const page = await browser.newPage();
     try {
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-        // Strategy: Search for "Company Name email contact"
-        const query = `${companyName} email address contact`;
-        await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 5000 });
+        // Build queries — domain-based first (more precise), then company name
+        const queries = [];
+        if (website) {
+            try {
+                const domain = new URL(website).hostname.replace('www.', '');
+                queries.push(`${domain} email`);
+            } catch (e) { }
+        }
+        queries.push(`"${companyName}" email contact`);
 
-        const content = await page.content();
-        const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/gi;
-        const emails = content.match(emailRegex) || [];
+        const junkDomains = ['google.com', 'duckduckgo.com', 'example.com', 'sentry.io', 'wixpress.com', 'schema.org', 'w3.org', 'bing.com', 'yahoo.com'];
+        const junkPrefixes = new Set(['noreply', 'no-reply', 'donotreply', 'bounce', 'mailer-daemon', 'postmaster', 'user', 'email', 'name', 'support', 'info', 'hello', 'contact', 'admin']);
 
-        const validEmails = emails.filter(e => !e.includes('.png') && !e.includes('.jpg') && !e.includes('example') && !e.includes('google'));
+        const extractEmails = (text) => {
+            const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+            const found = text.match(emailRegex) || [];
+            return found.filter(e => {
+                const [local, domain] = e.toLowerCase().split('@');
+                if (!domain) return false;
+                if (junkDomains.some(d => domain.includes(d))) return false;
+                if (e.match(/\.(png|jpg|svg|css|js|webp|gif|woff|ttf)$/i)) return false;
+                const v = validateEmailFast(e);
+                return v.isValid;
+            });
+        };
 
-        // Validate found emails
-        for (const email of validEmails) {
-            const validation = await validateEmail(email);
-            if (validation.isValid) return email;
+        for (const query of queries) {
+            try {
+                // Use DuckDuckGo — far less aggressive bot detection than Google
+                const ddgUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&ia=web`;
+                log(`DDG email search: ${query}`);
+                await page.goto(ddgUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+                await new Promise(r => setTimeout(r, 2000)); // let JS render
+
+                const text = await page.evaluate(() => document.body.innerText);
+
+                // Debug: show first 200 chars so we can see if it's a block page
+                log(`DDG page snippet: ${text.substring(0, 200).replace(/\n/g, ' ')}`);
+
+                const emails = extractEmails(text);
+                if (emails.length > 0) {
+                    // Prefer non-generic prefixes (e.g. john@company.com over info@company.com)
+                    const personal = emails.find(e => !junkPrefixes.has(e.split('@')[0]));
+                    const result = personal || emails[0];
+                    log(`DDG found email: ${result}`);
+                    return { email: result, pageText: text };
+                }
+
+                // Also try clicking the first result link and scraping that page for email
+                try {
+                    const firstResultUrl = await page.evaluate(() => {
+                        const links = Array.from(document.querySelectorAll('[data-testid="result-title-a"], .result__a, a[href^="http"]'));
+                        for (const a of links) {
+                            const href = a.href || '';
+                            if (href.startsWith('http') && !href.includes('duckduckgo') && !href.includes('google')) {
+                                return href;
+                            }
+                        }
+                        return null;
+                    });
+
+                    if (firstResultUrl) {
+                        log(`Visiting result page: ${firstResultUrl}`);
+                        await page.goto(firstResultUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                        const pageText = await page.evaluate(() => document.body.innerText);
+                        const pageEmails = extractEmails(pageText);
+                        if (pageEmails.length > 0) {
+                            const personal = pageEmails.find(e => !junkPrefixes.has(e.split('@')[0]));
+                            const result = personal || pageEmails[0];
+                            log(`Result page found email: ${result}`);
+                            return { email: result, pageText };
+                        }
+                    }
+                } catch (e) { }
+
+            } catch (e) {
+                log(`DDG email search failed (${query}): ${e.message}`);
+            }
         }
 
-        return '';
+        log(`No email found for: ${companyName}`);
+        return { email: '', pageText: '' };
     } catch (e) {
-        return '';
+        log(`Email search error: ${e.message}`);
+        return { email: '', pageText: '' };
     } finally {
         try { await page.close(); } catch (e) { }
     }
@@ -918,7 +1060,8 @@ async function gatherExternalIntel(browser, companyName) {
 }
 
 // FIXED WEBSITE SCRAPER
-async function scrapeWebsite(browser, url, log = console.log, notesContext = '', companyNameOverride = '') {
+// skipExternalIntel: skip the 2 extra Google searches per lead (use during bulk Maps scraping)
+async function scrapeWebsite(browser, url, log = console.log, notesContext = '', companyNameOverride = '', skipExternalIntel = false) {
     const page = await browser.newPage();
     const data = { email: '', phone: '', summary: '', social: { twitter: '', facebook: '', instagram: '', linkedin: '' } };
 
@@ -1095,12 +1238,11 @@ async function scrapeWebsite(browser, url, log = console.log, notesContext = '',
                     return aPrio - bPrio;
                 });
 
-                // Verify emails before accepting
+                // Select Best Email using FAST validation (no DNS lookup during scraping)
                 for (const email of emailList) {
-                    // Skip if obviously invalid regex (already filtered but double check)
-                    const validation = await validateEmail(email);
+                    const validation = validateEmailFast(email);
                     if (validation.isValid) {
-                        data.email = email;
+                        data.email = validation.cleanedEmail;
                         break;
                     }
                 }
@@ -1115,12 +1257,14 @@ async function scrapeWebsite(browser, url, log = console.log, notesContext = '',
         const pageTitle = await page.evaluate(() => document.title).catch(() => companyNameOverride || '');
         const companyName = companyNameOverride || pageTitle || (url ? new URL(url).hostname : 'Unknown Company');
 
-        // GATHER EXTERNAL INTEL
-        log('Gathering external intel (CEO/Socials)...');
-        const externalIntel = await gatherExternalIntel(browser, companyName);
-        aggregatedText += externalIntel;
+        // 6. External Intel (skip during bulk Maps scraping to avoid slowdowns)
+        if (!skipExternalIntel) {
+            log('Gathering external intel (CEO/Socials)...');
+            const externalIntel = await gatherExternalIntel(browser, companyName);
+            aggregatedText += externalIntel;
+        }
 
-        if (aggregatedText.length > 20 || externalIntel.length > 20) {
+        if (aggregatedText.length > 20) {
             log('Generating Deep Research Report...');
             data.summary = await generateAISummary(aggregatedText, notesContext);
         } else {

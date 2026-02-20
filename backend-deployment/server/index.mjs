@@ -23,6 +23,19 @@ const supabase = (supabaseUrl && supabaseKey)
   : null;
 
 const app = express();
+
+// CORS must be first — before all routes and body parsers
+const corsOptions = {
+  origin: true, // Reflect request origin to allow all
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-campaign-id']
+};
+app.use(cors(corsOptions));
+
+// Handle preflight requests explicitly with the same config
+app.options('*', cors(corsOptions));
+
 app.use(express.json());
 
 // Add a root route for health check
@@ -32,15 +45,6 @@ app.get('/', (req, res) => {
 app.get('/api', (req, res) => {
   res.send('API Root Accessible');
 });
-app.use(cors({
-  origin: true, // Reflect request origin to allow all
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-campaign-id']
-}));
-
-// Handle preflight requests explicitly
-app.options('*', cors());
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'sk-d703ac9c0fe74d05b1693c50a81ea9bc';
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
@@ -356,20 +360,22 @@ app.post('/api/deep-research', async (req, res) => {
 });
 
 app.post('/api/scrape-leads', async (req, res) => {
+  let user;
   try {
-    const { platforms, business, location, keywords, notesContext, limit = 20 } = req.body;
+    const { platforms, business, location, keywords, notesContext, limit = 75 } = req.body;
 
     const authHeader = req.headers.authorization;
     if (!authHeader) {
-      throw new Error('Missing authorization header');
+      return res.status(401).json({ success: false, error: 'Missing authorization header' });
     }
 
     const token = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    const { data: { user: authUser }, error: authError } = await supabase.auth.getUser(token);
 
-    if (authError || !user) {
-      throw new Error('Unauthorized');
+    if (authError || !authUser) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
+    user = authUser;
 
     // Initialize user-specific stores
     userLogs.set(user.id, []);
@@ -381,18 +387,18 @@ app.post('/api/scrape-leads', async (req, res) => {
       console.log(`[${user.id}] ${message}`);
       const logs = userLogs.get(user.id) || [];
       logs.push({ timestamp, message });
-      if (logs.length > 200) logs.shift();
+      if (logs.length > 500) logs.shift();
       userLogs.set(user.id, logs);
     };
 
     const onResult = async (lead) => {
       const results = userResults.get(user.id) || [];
-      const exists = results.some(r => (r.website && r.website === lead.website) || (r.email && r.email === lead.email));
+      const exists = results.some(r => (r.email && r.email === lead.email) || (r.website && r.website === lead.website && r.company === lead.company));
 
       if (!exists) {
         results.push(lead);
         userResults.set(user.id, results);
-        console.log(`[Main Server] Added lead for ${user.id}: ${lead.company}`);
+        console.log(`[Main Server] Added lead for ${user.id}: ${lead.company} <${lead.email}>`);
 
         // Save to Supabase
         const scopedSupabase = createClient(
@@ -420,84 +426,78 @@ app.post('/api/scrape-leads', async (req, res) => {
 
         const { error } = await scopedSupabase
           .from('leads')
-          .upsert(leadData, {
-            onConflict: 'user_id,website,email',
-            ignoreDuplicates: false
-          });
+          .insert(leadData);
 
         if (error) {
           console.error('[Main Server] Error saving lead to DB:', error.message);
-          // Fallback: try upserting with just user_id,website if email is null, handled by DB unique index ideally
         }
       }
     };
 
-    log(`Starting scrape for ${business} in ${location}...`);
+    log(`Starting scrape for "${business}" in "${location}"... (target: ${limit} leads with emails)`);
     if (notesContext) log(`Custom Notes Focus: ${notesContext}`);
 
-    let totalResults = [];
+    // ✅ RESPOND IMMEDIATELY — scrape runs in background so navigating away doesn't stop it
+    res.json({ success: true, message: 'Scrape started in background. Check logs for progress.' });
 
-    // Construct query
-    if (platforms.google || platforms.all) {
-      const query = `${business || keywords} in ${location}`;
-      const googleResults = await scrapeGoogleMaps(query, limit, log, onResult, notesContext);
-      totalResults = [...totalResults, ...googleResults];
-    }
+    // Run scraping in background (no await — response already sent)
+    const runScrape = async () => {
+      try {
+        if (platforms.google || platforms.all) {
+          const query = `${business || keywords} in ${location}`;
+          await scrapeGoogleMaps(query, limit, log, onResult, notesContext);
+        }
 
-    if (platforms.linkedin || platforms.all) {
-      const jobRole = req.body.jobRole || '';
-      const businessPart = business ? business : "";
-      const rolePart = jobRole ? jobRole : "";
-      const locationPart = location ? location : "";
+        if (platforms.linkedin || platforms.all) {
+          const jobRole = req.body.jobRole || '';
+          const businessPart = business ? business : '';
+          const rolePart = jobRole ? jobRole : '';
+          const locationPart = location ? location : '';
+          const linkedInQuery = `site:linkedin.com/in/ ${rolePart} ${businessPart} ${locationPart} ${keywords || ''}`.trim();
+          await scrapeLinkedIn(linkedInQuery, limit, log, onResult, notesContext);
+        }
 
-      const linkedInQuery = `site:linkedin.com/in/ ${rolePart} ${businessPart} ${locationPart} ${keywords || ""}`.trim();
-      const linkedInResults = await scrapeLinkedIn(linkedInQuery, limit, log, onResult, notesContext);
-      totalResults = [...totalResults, ...linkedInResults];
-    }
+        if (platforms.general || platforms.all) {
+          const jobRole = req.body.jobRole || '';
+          const rolePart = jobRole ? `"${jobRole}"` : '';
+          const businessPart = business ? `"${business}"` : (keywords || '');
+          const businessQuery = `${rolePart} ${businessPart} ${location} email contact`.trim();
+          await scrapeGeneralSearch(businessQuery, limit, log, onResult, notesContext);
+        }
 
-    if (platforms.general || platforms.all) {
-      const jobRole = req.body.jobRole || '';
-      const rolePart = jobRole ? `"${jobRole}"` : "";
-      const businessPart = business ? `"${business}"` : (keywords || "");
-      const businessQuery = `${rolePart} ${businessPart} ${location} email contact`.trim();
-      const generalResults = await scrapeGeneralSearch(businessQuery, limit, log, onResult, notesContext);
-      totalResults = [...totalResults, ...generalResults];
-    }
+        const finalCount = (userResults.get(user.id) || []).length;
+        log(`✅ Scrape complete. ${finalCount} leads with emails saved.`);
+      } catch (bgError) {
+        console.error('[Background Scrape Error]', bgError);
+        log(`❌ Scrape error: ${bgError.message}`);
+        try {
+          fs.appendFileSync('debug_error.log', `[${new Date().toISOString()}] BG Scrape Error: ${bgError.stack || bgError.message}\n`);
+        } catch (e) { }
+      } finally {
+        activeScrapes.set(user.id, false);
+        log('Scraper finished.');
+      }
+    };
 
-    res.json({ success: true, data: totalResults });
+    // Fire and forget
+    runScrape();
 
   } catch (error) {
     console.error('Scraping API Error:', error);
-    try {
-      fs.appendFileSync('debug_error.log', `[${new Date().toISOString()}] Scrape Error: ${error.stack || error.message}\n`);
-    } catch (e) { }
-
-    try {
-      if (req.body && req.body.userId) { // Fallback if user object from auth failed
-        const logs = userLogs.get(req.body.userId) || [];
-        logs.push({ timestamp: new Date().toLocaleTimeString(), message: `ERROR: ${error.message}` });
-        userLogs.set(req.body.userId, logs);
-      } else if (typeof user !== 'undefined' && user?.id) {
-        const logs = userLogs.get(user.id) || [];
-        logs.push({ timestamp: new Date().toLocaleTimeString(), message: `ERROR: ${error.message}` });
-        userLogs.set(user.id, logs);
-      }
-    } catch (logError) {
-      console.error('Failed to log error to user store:', logError);
+    if (user?.id) {
+      const logs = userLogs.get(user.id) || [];
+      logs.push({ timestamp: new Date().toLocaleTimeString(), message: `ERROR: ${error.message}` });
+      userLogs.set(user.id, logs);
+      activeScrapes.set(user.id, false);
     }
-
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Scraping failed'
-    });
-  } finally {
-    // Check if user is defined before accessing id
-    const userId = (typeof user !== 'undefined' && user?.id) ? user.id : null;
-    if (userId) {
-      activeScrapes.set(userId, false);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Scraping failed' });
     }
   }
 });
+
+
+
 
 
 app.get('/api/emails', async (req, res) => {
