@@ -103,24 +103,34 @@ async function setupBrowser(log) {
         executablePath = await sparticuz.executablePath();
         args = [...sparticuz.args, '--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox'];
 
-        puppeteer = require('puppeteer-core');
-        log('Using @sparticuz/chromium + puppeteer-core (Priority Match)');
+        const { addExtra } = require('puppeteer-extra');
+        const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+        puppeteer = addExtra(require('puppeteer-core'));
+        puppeteer.use(StealthPlugin());
+        log('Using @sparticuz/chromium + puppeteer-core (Stealth Match)');
 
     } catch (e) {
         log(`Sparticuz failed/missing: ${e.message}. Falling back to standard puppeteer.`);
 
         // 2. Fallback to Standard Puppeteer
         try {
-            puppeteer = require('puppeteer');
-            log('Using standard puppeteer package.');
+            const { addExtra } = require('puppeteer-extra');
+            const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+            puppeteer = addExtra(require('puppeteer'));
+            puppeteer.use(StealthPlugin());
+            log('Using puppeteer-extra with stealth plugin.');
         } catch (e2) {
             // 3. Last Ditch: Puppeteer Core only (expects local chrome)
             try {
-                puppeteer = require('puppeteer-core');
+                const { addExtra } = require('puppeteer-extra');
+                const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+                puppeteer = addExtra(require('puppeteer-core'));
+                puppeteer.use(StealthPlugin());
+
                 const exe = getChromePath();
                 if (exe) {
                     executablePath = exe;
-                    log(`Using local chrome discovery: ${exe}`);
+                    log(`Using local chrome discovery (Stealth): ${exe}`);
                 }
             } catch (e3) {
                 throw new Error('Puppeteer dependency missing (All methods failed).');
@@ -275,6 +285,10 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
         // Keep scrolling until we have targetLimit leads WITH emails
         while (leadsWithEmail < targetLimit && noNewResultsCount < 60) {
             const elements = await page.$$('div[role="article"]');
+
+            if (elements.length === 0 && leadsWithEmail === 0) {
+                log('WARNING: Google Maps returned 0 local business results. This usually means your server IP was blocked by a CAPTCHA/Consent screen, or the search query found no matches.');
+            }
 
             // Collect unprocessed elements first
             const pendingElements = [];
