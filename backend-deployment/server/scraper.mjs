@@ -305,7 +305,7 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                 processedIds.add(ariaLabel);
                 totalProcessed++;
 
-                pendingElements.push(el);
+                pendingElements.push({ el, ariaLabel });
             }
 
             // Process in batches of 5 to avoid overwhelming the server
@@ -313,7 +313,8 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
             for (let batchStart = 0; batchStart < pendingElements.length; batchStart += BATCH_SIZE) {
                 if (leadsWithEmail >= targetLimit) break;
                 const batch = pendingElements.slice(batchStart, batchStart + BATCH_SIZE);
-                const batchPromises = batch.map(el => (async () => {
+                const batchPromises = batch.map(item => (async () => {
+                    const { el, ariaLabel } = item;
                     try {
                         // Helper for robust phone extraction (UK focus)
                         const extractPhoneNumber = (str) => {
@@ -332,7 +333,12 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                             if (!url) return '';
                             if (url.includes('google.com/viewer')) return '';
                             if (url.includes('google.com/aclk') || url.includes('google.com/url')) {
-                                try { return decodeURIComponent(url.split('adurl=')[1] || url.split('q=')[1]).split('&')[0]; } catch (e) { return url; }
+                                try {
+                                    const extracted = url.split('adurl=')[1] || url.split('q=')[1];
+                                    if (extracted) {
+                                        return decodeURIComponent(extracted).split('&')[0];
+                                    }
+                                } catch (e) { return url; }
                             }
                             return url;
                         };
@@ -464,7 +470,7 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
                                     googleSearchEmail(browser, ariaLabel, '', log),
                                     new Promise((_, reject) => setTimeout(() => reject(new Error('Fallback email search timeout')), 20000))
                                 ]);
-                                if (googleEmail) email = googleEmail;
+                                if (googleEmail && googleEmail.email) email = googleEmail.email;
                             } catch (e) { }
                         }
 
