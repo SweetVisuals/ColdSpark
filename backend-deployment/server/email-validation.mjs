@@ -19,69 +19,75 @@ const PLACEHOLDER_DOMAINS = new Set([
 // Words appearing in scraped data that aren't real emails (often CSS or file attributes)
 const JUNK_LOCAL_PARTS = new Set([
     'wght', 'width', 'height', 'size', 'color', 'background', 'url', 'src',
-    'href', 'image', 'img', 'icon', 'logo', 'svg', 'png', 'jpg', 'jpeg'
+    'href', 'image', 'img', 'icon', 'logo', 'svg', 'png', 'jpg', 'jpeg',
+    'domain', 'user', 'name', 'firstname', 'lastname', 'email', 'noreply',
+    'no-reply', 'donotreply', 'do-not-reply', 'unsubscribe', 'bounce',
+    'mailer-daemon', 'postmaster'
 ]);
 
-export async function validateEmail(rawEmail) {
+// Shared syntax check used by both fast and full validation
+function syntaxCheck(rawEmail) {
     if (!rawEmail || typeof rawEmail !== 'string') {
         return { isValid: false, reason: 'Empty or invalid format' };
     }
 
-    // 1. Sanitization & Cleaning
     let email = rawEmail.trim();
-
-    // Remove URL encoding if present (e.g. %20info)
-    try {
-        email = decodeURIComponent(email);
-    } catch (e) {
-        // failed to decode, continue with original check or strip known bad chars
+    try { email = decodeURIComponent(email); } catch (e) {
         email = email.replace(/%[0-9A-F]{2}/gi, '');
     }
-
     email = email.trim().toLowerCase();
 
-    // 2. Syntax Check (Stricter)
-    // - Local part: Allow alphanumeric, dot, underscore, plus, hyphen.
-    // - Domain: Allow alphanumeric, dot, hyphen. 
-    // - TLD: Must be at least 2 letters (alpha only). Rejects IP addresses or numeric TLDs like .500
     const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-
     if (!emailRegex.test(email)) {
         return { isValid: false, reason: 'Invalid syntax' };
     }
 
     const [localPart, domain] = email.split('@');
 
-    // 3. Junk/Scraping Artifact Check
     if (JUNK_LOCAL_PARTS.has(localPart)) {
-        // e.g. wght@400..500
-        return { isValid: false, reason: 'Likely scraping artifact' };
+        return { isValid: false, reason: 'Likely scraping artifact or no-reply address' };
     }
 
-    // Check for ".." in domain which is invalid but might pass some simple split checks
     if (domain.includes('..')) {
         return { isValid: false, reason: 'Invalid domain syntax (double dot)' };
     }
 
-    // 4. Keyword/Placeholder Check
-    // Block "user@domain.com", "admin@example.com" etc.
     if (PLACEHOLDER_DOMAINS.has(domain)) {
         return { isValid: false, reason: 'Placeholder domain detected' };
     }
 
-    // Additional strict check for generic local parts on ANY domain if it looks suspicious? 
-    // Maybe not, "admin" is valid for real companies. 
-    // But "user" is rarely a real contact email for outreach.
-    if (localPart === 'user' || localPart === 'name' || localPart === 'firstname' || localPart === 'lastname' || localPart === 'email') {
-        return { isValid: false, reason: 'Generic placeholder name' };
-    }
-
-    // 5. Disposable Domain Check
     if (DISPOSABLE_DOMAINS.has(domain)) {
         return { isValid: false, reason: 'Disposable email detected' };
     }
 
-    // 6. DNS MX Record Check
+    // Block obvious image/asset false positives
+    if (email.match(/\.(png|jpg|svg|css|js|webp|gif|woff|ttf)$/i)) {
+        return { isValid: false, reason: 'File extension in email' };
+    }
+
+    return { isValid: true, cleanedEmail: email };
+}
+
+/**
+ * Fast validation — syntax only, NO DNS lookup.
+ * Use this during scraping to avoid blocking on DNS timeouts.
+ */
+export function validateEmailFast(rawEmail) {
+    return syntaxCheck(rawEmail);
+}
+
+/**
+ * Full validation — syntax + DNS MX record check.
+ * Use this for user-submitted emails (e.g. SMTP setup).
+ */
+export async function validateEmail(rawEmail) {
+    const syntaxResult = syntaxCheck(rawEmail);
+    if (!syntaxResult.isValid) return syntaxResult;
+
+    const email = syntaxResult.cleanedEmail;
+    const domain = email.split('@')[1];
+
+    // DNS MX Record Check
     try {
         const addresses = await resolveMx(domain);
         if (!addresses || addresses.length === 0) {
@@ -92,9 +98,7 @@ export async function validateEmail(rawEmail) {
         if (error.code === 'ENOTFOUND' || error.code === 'ENODATA' || error.code === 'EREFUSED') {
             return { isValid: false, reason: 'Domain does not exist or has no mail server' };
         }
-        console.error(`DNS check failed for ${domain}:`, error);
-        // If DNS check fails due to network/timeout, we can return valid with warning, 
-        // OR strict mode: return invalid. Let's return warning.
+        // If DNS check fails due to network/timeout, pass with warning
         return { isValid: true, warning: 'DNS check skipped/failed', details: error.code, cleanedEmail: email };
     }
 }
