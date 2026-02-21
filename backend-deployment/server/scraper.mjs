@@ -540,19 +540,36 @@ export async function scrapeGoogleMaps(query, limit = 50, onLog = null, onResult
             // SCROLL to load more results
             if (leadsWithEmail < targetLimit) {
                 const prevCount = elements.length;
+
+                // Fallback robust scroll: Focus last element and PageDown
+                try {
+                    const lastEl = elements[elements.length - 1];
+                    if (lastEl) {
+                        await lastEl.hover();
+                        await page.mouse.wheel({ deltaY: 2000 });
+                        await lastEl.focus().catch(() => { });
+                        await page.keyboard.press('PageDown');
+                        await page.keyboard.press('PageDown');
+                    }
+                } catch (e) { }
+
                 await page.evaluate((sel) => {
                     const el = document.querySelector(sel);
                     if (el) el.scrollBy(0, 5000);
+                    // attempt to scroll window just in case
+                    window.scrollBy(0, 5000);
                 }, feedSelector);
-                await page.mouse.wheel({ deltaY: 2000 });
+
                 await new Promise(r => setTimeout(r, 2500));
 
                 const newEls = await page.$$('div[role="article"]');
+                log(`[SCROLL DEBUG] Old element count: ${prevCount}, New element count: ${newEls.length}, Streak: ${noNewElementsStreak}`);
+
                 if (newEls.length === prevCount) {
                     noNewElementsStreak++;
                     noNewResultsCount++;
                     if (noNewElementsStreak > 3) {
-                        log('No new results loading after multiple scrolls. Stopping.');
+                        log(`No new results loading after multiple scrolls (Stuck at ${newEls.length} elements). Stopping.`);
                         break;
                     }
                     log(`Scrolling for more results... (${noNewResultsCount}/60)`);
